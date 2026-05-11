@@ -1,0 +1,43 @@
+---
+- name: Prepare all servers
+  hosts: all
+  become: true
+  tasks:
+    - name: Update system packages
+      dnf:
+        name: '*'
+        state: latest
+        update_cache: yes
+
+    - name: Install common tools
+      dnf:
+        name:
+          - git
+          - wget
+          - vim
+          - python3
+          - docker
+        state: present
+
+    - name: Start and enable Docker
+      service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Add ec2-user to docker group
+      user:
+        name: ec2-user
+        groups: docker
+        append: yes
+
+    - name: Disable Swap (Required for K8s)
+      command: swapoff -a
+      when: inventory_hostname in groups['k8s_master'] or inventory_hostname in groups['k8s_worker']
+
+    - name: Disable Swap in fstab
+      lineinfile:
+        path: /etc/fstab
+        regexp: 'swap'
+        state: absent
+      when: inventory_hostname in groups['k8s_master'] or inventory_hostname in groups['k8s_worker']

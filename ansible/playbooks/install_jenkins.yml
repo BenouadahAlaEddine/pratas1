@@ -1,0 +1,83 @@
+---
+- name: Install Jenkins
+  hosts: jenkins
+  become: true
+  tasks:
+    - name: Remove Java 17 if present
+      dnf:
+        name: java-17-amazon-corretto-headless
+        state: absent
+
+    - name: Install Java 21 (Required for Jenkins 2.463+)
+      dnf:
+        name: java-21-amazon-corretto-headless
+        state: present
+
+    - name: Set Java 21 as default via alternatives
+      command: >
+        alternatives --set java
+        /usr/lib/jvm/java-21-amazon-corretto.x86_64/bin/java
+      changed_when: false
+      ignore_errors: true
+
+    - name: Verify Java version
+      command: java -version
+      register: java_version
+      changed_when: false
+
+    - name: Debug Java version
+      debug:
+        msg: "{{ java_version.stderr }}"
+
+    - name: Add Jenkins repo key
+      rpm_key:
+        key: https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
+        state: present
+
+    - name: Add Jenkins repo
+      yum_repository:
+        name: jenkins
+        description: Jenkins stable repo
+        baseurl: https://pkg.jenkins.io/redhat-stable/
+        gpgcheck: no
+
+    - name: Install Jenkins
+      dnf:
+        name: jenkins
+        state: present
+
+    - name: Create systemd override directory
+      file:
+        path: /etc/systemd/system/jenkins.service.d
+        state: directory
+        mode: '0755'
+
+    - name: Write systemd override with JAVA_HOME for Java 21
+      copy:
+        dest: /etc/systemd/system/jenkins.service.d/override.conf
+        content: |
+          [Service]
+          Environment="JAVA_HOME=/usr/lib/jvm/java-21-amazon-corretto.x86_64"
+          Environment="PATH=/usr/lib/jvm/java-21-amazon-corretto.x86_64/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+        mode: '0644'
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: true
+
+    - name: Start and enable Jenkins
+      service:
+        name: jenkins
+        state: started
+        enabled: true
+
+    - name: Wait for Jenkins to start
+      wait_for:
+        port: 8080
+        timeout: 90
+
+  handlers:
+    - name: Restart Jenkins
+      service:
+        name: jenkins
+        state: restarted

@@ -1,0 +1,57 @@
+---
+- name: Install K3s Master
+  hosts: k8s_master
+  become: true
+  tasks:
+    - name: Install K3s Server
+      shell: curl -sfL https://get.k3s.io | sh -
+      args:
+        creates: /usr/local/bin/k3s
+
+    - name: Wait for K3s to be ready
+      wait_for:
+        path: /etc/rancher/k3s/k3s.yaml
+        state: present
+        timeout: 60
+
+    - name: Create .kube directory for ec2-user
+      file:
+        path: /home/ec2-user/.kube
+        state: directory
+        owner: ec2-user
+        group: ec2-user
+        mode: '0755'
+
+    - name: Copy kubeconfig to user home
+      copy:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: /home/ec2-user/.kube/config
+        remote_src: yes
+        owner: ec2-user
+        group: ec2-user
+        mode: '0600'
+
+    - name: Get K3s Node Token
+      command: cat /var/lib/rancher/k3s/server/node-token
+      register: k3s_token_result
+      changed_when: false
+
+    # On stocke le token dans un fichier temporaire sur le master pour que le worker puisse le lire via Ansible facts
+    - name: Save token to fact
+      set_fact:
+        k3s_token: "{{ k3s_token_result.stdout }}"
+
+- name: Install K3s Worker
+  hosts: k8s_worker
+  become: true
+  vars:
+    k3s_url: "https://{{ hostvars['k8s_master']['ansible_host'] }}:6443"
+  tasks:
+    - name: Install K3s Agent
+      shell: >
+        curl -sfL https://get.k3s.io | 
+        K3S_URL={{ k3s_url }} 
+        K3S_TOKEN={{ hostvars['k8s_master']['k3s_token'] }} 
+        sh -
+      args:
+        creates: /usr/local/bin/k3s

@@ -1,0 +1,10 @@
+---
+- name: Bootstrap Python on Amazon Linux 2023
+  hosts: all
+  gather_facts: no # Important: ne pas essayer de collecter les facts sans python
+  tasks:
+    - name: Install Python 3 via raw command
+      raw: sudo dnf install -y python3
+
+    - name: Create symlink for python
+      raw: sudo ln -s /usr/bin/python3 /usr/bin/python || true

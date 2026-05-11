@@ -1,0 +1,168 @@
+version: '3.9'
+
+networks:
+  shopwave-net:
+    driver: bridge
+
+volumes:
+  auth-data:
+  products-data:
+  orders-data:
+  payments-data:
+  notifications-data:
+
+x-common-env: &common-env
+  NODE_ENV: production
+  JWT_SECRET: shopwave-super-secret-jwt-key-2024-change-in-production
+  REFRESH_SECRET: shopwave-refresh-secret-2024-change-in-production
+
+services:
+  # ─── API Gateway ────────────────────────────────────────────────────────────
+  gateway:
+    build: ./gateway
+    image: aladin78/gateway:latest
+    container_name: shopwave-gateway
+    ports:
+      - "5000:5000"
+    networks: [shopwave-net]
+    environment:
+      <<: *common-env
+      PORT: 5000
+      AUTH_SERVICE_URL:          http://auth:3001
+      PRODUCTS_SERVICE_URL:      http://products:3002
+      ORDERS_SERVICE_URL:        http://orders:3003
+      PAYMENTS_SERVICE_URL:      http://payments:3004
+      NOTIFICATIONS_SERVICE_URL: http://notifications:3005
+    depends_on:
+      auth:          { condition: service_healthy }
+      products:      { condition: service_healthy }
+      orders:        { condition: service_healthy }
+      payments:      { condition: service_healthy }
+      notifications: { condition: service_healthy }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ─── Auth Service ────────────────────────────────────────────────────────────
+  auth:
+    build: ./services/auth
+    image: aladin78/auth:latest
+    container_name: shopwave-auth
+    networks: [shopwave-net]
+    environment:
+      <<: *common-env
+      PORT: 3001
+      DATA_DIR: /app/data
+    volumes:
+      - auth-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ─── Products Service ────────────────────────────────────────────────────────
+  products:
+    build: ./services/products
+    image: aladin78/products:latest
+    container_name: shopwave-products
+    networks: [shopwave-net]
+    environment:
+      <<: *common-env
+      PORT: 3002
+      DATA_DIR: /app/data
+    volumes:
+      - products-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ─── Orders Service ──────────────────────────────────────────────────────────
+  orders:
+    build: ./services/orders
+    image: aladin78/orders:latest
+    container_name: shopwave-orders
+    networks: [shopwave-net]
+    environment:
+      <<: *common-env
+      PORT: 3003
+      DATA_DIR: /app/data
+      PRODUCTS_SERVICE_URL:      http://products:3002
+      NOTIFICATIONS_SERVICE_URL: http://notifications:3005
+    volumes:
+      - orders-data:/app/data
+    depends_on:
+      products:      { condition: service_healthy }
+      notifications: { condition: service_healthy }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ─── Payments Service ────────────────────────────────────────────────────────
+  payments:
+    build: ./services/payments
+    image: aladin78/payments:latest
+    container_name: shopwave-payments
+    networks: [shopwave-net]
+    environment:
+      <<: *common-env
+      PORT: 3004
+      DATA_DIR: /app/data
+      NOTIFICATIONS_SERVICE_URL: http://notifications:3005
+    volumes:
+      - payments-data:/app/data
+    depends_on:
+      notifications: { condition: service_healthy }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ─── Notifications Service ───────────────────────────────────────────────────
+  notifications:
+    build: ./services/notifications
+    image: aladin78/notifications:latest
+    container_name: shopwave-notifications
+    networks: [shopwave-net]
+    environment:
+      <<: *common-env
+      PORT: 3005
+      DATA_DIR: /app/data
+    volumes:
+      - notifications-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ─── Frontend ────────────────────────────────────────────────────────────────
+  frontend:
+    build: ./frontend
+    image: aladin78/frontend:latest
+    container_name: shopwave-frontend
+    ports:
+      - "4000:80"
+    networks: [shopwave-net]
+    depends_on:
+      - gateway
+    restart: unless-stopped

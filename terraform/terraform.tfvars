@@ -1,0 +1,12 @@
+region        = "eu-west-3"
+vpc_name      = "cyberpunks_vpc"
+key_name      = "pratas"
+ami_id        = "ami-078abd88811000d7e"
+IGW           = "cyberpunks_igw"
+natgtw        = "nat-1edb1cd639aec0585"
+az            = "eu-west-3a"
+
+instance_type_jenkins      = "t3.medium"
+instance_type_sonar        = "t3.medium"
+instance_type_k8s          = "t3.small"
+instance_type_k8s_worker = "t3.large"

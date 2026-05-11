@@ -1,0 +1,100 @@
+---
+- name: Install SonarQube via Docker
+  hosts: sonarqube
+  become: true
+  vars:
+    sonarqube_version: "lts-community"
+    sonarqube_port: 9000
+    sonarqube_data_dir: /opt/sonarqube
+
+  tasks:
+    # ── Prérequis système ──────────────────────────────────────────
+    - name: Install required packages
+      dnf:
+        name:
+          - docker
+          - python3-pip
+        state: present
+
+    - name: Install Docker SDK for Python
+      pip:
+        name: docker
+        state: present
+
+    - name: Start and enable Docker
+      service:
+        name: docker
+        state: started
+        enabled: true
+
+    # ── Paramètres kernel ──────────────────────────────────────────
+    - name: Set vm.max_map_count
+      shell: sysctl -w vm.max_map_count=524288
+      changed_when: false
+
+    - name: Set fs.file-max
+      shell: sysctl -w fs.file-max=131072
+      changed_when: false
+
+    - name: Persist sysctl settings
+      copy:
+        dest: /etc/sysctl.d/99-sonarqube.conf
+        content: |
+          vm.max_map_count=524288
+          fs.file-max=131072
+        mode: '0644'
+
+    # ── Volumes persistants ────────────────────────────────────────
+    - name: Create SonarQube data directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0777'
+      loop:
+        - "{{ sonarqube_data_dir }}/data"
+        - "{{ sonarqube_data_dir }}/logs"
+        - "{{ sonarqube_data_dir }}/extensions"
+        - "{{ sonarqube_data_dir }}/conf"
+
+    # ── Container SonarQube ────────────────────────────────────────
+    - name: Pull SonarQube image
+      shell: docker pull sonarqube:{{ sonarqube_version }}
+      changed_when: false
+
+    - name: Stop existing container if running
+      shell: docker stop sonarqube 2>/dev/null || true
+      changed_when: false
+
+    - name: Remove existing container if exists
+      shell: docker rm sonarqube 2>/dev/null || true
+      changed_when: false
+
+    - name: Run SonarQube container
+      shell: |
+        docker run -d \
+          --name sonarqube \
+          --restart always \
+          -p {{ sonarqube_port }}:9000 \
+          --ulimit nofile=131072:131072 \
+          --ulimit nproc=8192:8192 \
+          -v {{ sonarqube_data_dir }}/data:/opt/sonarqube/data \
+          -v {{ sonarqube_data_dir }}/logs:/opt/sonarqube/logs \
+          -v {{ sonarqube_data_dir }}/extensions:/opt/sonarqube/extensions \
+          -v {{ sonarqube_data_dir }}/conf:/opt/sonarqube/conf \
+          sonarqube:{{ sonarqube_version }}
+      changed_when: false
+
+    # ── Attendre que SonarQube soit vraiment UP ────────────────────
+    - name: Wait for SonarQube API to be ready
+      uri:
+        url: "http://localhost:{{ sonarqube_port }}/api/system/status"
+        method: GET
+        status_code: 200
+      register: sonar_status
+      until: sonar_status.json.status == "UP"
+      retries: 30
+      delay: 10
+
+    - name: Display SonarQube status
+      debug:
+        msg: "SonarQube is UP at http://{{ ansible_host }}:{{ sonarqube_port }}"

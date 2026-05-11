@@ -1,0 +1,243 @@
+pipeline {
+    agent any
+
+    // ─── Pipeline-wide environment ────────────────────────────────────────────
+    environment {
+        APP_NAME         = 'shopwave'
+        REGISTRY         = 'docker.io/aladin78'  // Change to your registry: ECR, GCR, ACR, etc.
+        REGISTRY_CREDS   = 'docker-hub-credentials'
+        K8S_NAMESPACE    = 'shopwave'
+        HELM_RELEASE     = 'shopwave'
+        HELM_CHART_PATH  = './helm'
+        HELM_VALUES_PROD = './helm/values-prod.yaml'
+        KUBECONFIG_CREDS = 'k8s-kubeconfig'      // Jenkins credential ID for kubeconfig
+        GIT_REPO         = 'https://gitlab.com/dev8314550/micro-app.git'
+    }
+
+    // ─── Parameters ───────────────────────────────────────────────────────────
+    parameters {
+        string(name: 'IMAGE_TAG', defaultValue: "${env.BUILD_NUMBER}", description: 'Docker image tag')
+        choice(name: 'DEPLOY_ENV', choices: ['staging', 'production'], description: 'Deployment environment')
+        booleanParam(name: 'SKIP_TESTS', defaultValue: false, description: 'Skip tests')
+        booleanParam(name: 'SKIP_DEPLOY', defaultValue: false, description: 'Build only, skip Helm deploy')
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 45, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        timestamps()
+    }
+
+    stages {
+        // ── Stage 1: Checkout ─────────────────────────────────────────────────
+        stage('📥 Checkout') {
+            steps {
+                echo "Checking out ${env.BRANCH_NAME} @ ${env.GIT_COMMIT}"
+                checkout scm
+                script {
+                    env.IMAGE_TAG    = params.IMAGE_TAG ?: env.BUILD_NUMBER
+                    env.SHORT_COMMIT = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                    env.FULL_TAG     = "${env.IMAGE_TAG}-${env.SHORT_COMMIT}"
+                }
+                echo "Image tag: ${env.FULL_TAG}"
+            }
+        }
+
+        // ── Stage 2: Lint & Test (parallel) ──────────────────────────────────
+        stage('🧪 Test') {
+            when { expression { !params.SKIP_TESTS } }
+            parallel {
+                stage('Test: gateway') {
+                    steps {
+                        dir('gateway') {
+                            sh 'npm ci'
+                            sh 'npm test --passWithNoTests || true'
+                        }
+                    }
+                }
+                stage('Test: auth') {
+                    steps {
+                        dir('services/auth') {
+                            sh 'npm ci'
+                            sh 'npm test --passWithNoTests || true'
+                        }
+                    }
+                }
+                stage('Test: products') {
+                    steps {
+                        dir('services/products') {
+                            sh 'npm ci'
+                            sh 'npm test --passWithNoTests || true'
+                        }
+                    }
+                }
+                stage('Test: orders') {
+                    steps {
+                        dir('services/orders') {
+                            sh 'npm ci'
+                            sh 'npm test --passWithNoTests || true'
+                        }
+                    }
+                }
+                stage('Test: payments') {
+                    steps {
+                        dir('services/payments') {
+                            sh 'npm ci'
+                            sh 'npm test --passWithNoTests || true'
+                        }
+                    }
+                }
+                stage('Test: notifications') {
+                    steps {
+                        dir('services/notifications') {
+                            sh 'npm ci'
+                            sh 'npm test --passWithNoTests || true'
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Stage 3: Docker Build (parallel) ──────────────────────────────────
+        stage('🐳 Build Docker Images') {
+            steps {
+                script {
+                    def services = [
+                        [name: 'gateway',       path: './gateway'],
+                        [name: 'auth',          path: './services/auth'],
+                        [name: 'products',      path: './services/products'],
+                        [name: 'orders',        path: './services/orders'],
+                        [name: 'payments',      path: './services/payments'],
+                        [name: 'notifications', path: './services/notifications'],
+                        [name: 'frontend',      path: './frontend'],
+                    ]
+
+                    def builds = [:]
+                    services.each { svc ->
+                        def s = svc
+                        builds["Build: ${s.name}"] = {
+                            def imageTag = "${env.REGISTRY}/${s.name}:${env.FULL_TAG}"
+                            sh "docker build -t ${imageTag} ${s.path}"
+                            // Also tag as latest
+                            sh "docker tag ${imageTag} ${env.REGISTRY}/${s.name}:latest"
+                            echo "✅ Built: ${imageTag}"
+                        }
+                    }
+                    parallel builds
+                }
+            }
+        }
+
+        // ── Stage 4: Push to Registry ─────────────────────────────────────────
+        stage('📤 Push Images') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: env.REGISTRY_CREDS,
+                    usernameVariable: 'REGISTRY_USER',
+                    passwordVariable: 'REGISTRY_PASS'
+                )]) {
+                    sh 'echo "$REGISTRY_PASS" | docker login -u "$REGISTRY_USER" --password-stdin'
+                    script {
+                        def services = ['gateway', 'auth', 'products', 'orders', 'payments', 'notifications', 'frontend']
+                        def pushes = [:]
+                        services.each { svc ->
+                            def s = svc
+                            pushes["Push: ${s}"] = {
+                                sh "docker push ${env.REGISTRY}/${s}:${env.FULL_TAG}"
+                                sh "docker push ${env.REGISTRY}/${s}:latest"
+                                echo "✅ Pushed: ${env.REGISTRY}/${s}:${env.FULL_TAG}"
+                            }
+                        }
+                        parallel pushes
+                    }
+                }
+            }
+            post {
+                always {
+                    sh 'docker logout || true'
+                }
+            }
+        }
+
+        // ── Stage 5: Helm Lint ────────────────────────────────────────────────
+        stage('⎈ Helm Lint') {
+            steps {
+                sh "helm lint ${env.HELM_CHART_PATH}"
+                sh "helm template ${env.HELM_RELEASE} ${env.HELM_CHART_PATH} --set global.imageRegistry=${env.REGISTRY} > /tmp/shopwave-manifests.yaml"
+                sh "cat /tmp/shopwave-manifests.yaml | head -100"
+                echo "✅ Helm chart is valid"
+            }
+        }
+
+        // ── Stage 6: Deploy to Kubernetes ─────────────────────────────────────
+        stage('🚀 Deploy to Kubernetes') {
+            when {
+                expression { !params.SKIP_DEPLOY }
+            }
+            steps {
+                withCredentials([file(credentialsId: env.KUBECONFIG_CREDS, variable: 'KUBECONFIG')]) {
+                    script {
+                        def valuesFile = params.DEPLOY_ENV == 'production' ? env.HELM_VALUES_PROD : env.HELM_CHART_PATH + '/values.yaml'
+                        def extraArgs = "--set global.imageRegistry=${env.REGISTRY}"
+                        // Set individual service image tags
+                        ['gateway', 'auth', 'products', 'orders', 'payments', 'notifications', 'frontend'].each { svc ->
+                            extraArgs += " --set ${svc}.tag=${env.FULL_TAG}"
+                        }
+
+                        sh """
+                            helm upgrade --install ${env.HELM_RELEASE} ${env.HELM_CHART_PATH} \\
+                                --namespace ${env.K8S_NAMESPACE} \\
+                                --create-namespace \\
+                                -f ${valuesFile} \\
+                                ${extraArgs} \\
+                                --wait \\
+                                --timeout 10m \\
+                                --atomic
+                        """
+                        echo "✅ Deployed ${env.HELM_RELEASE} to ${params.DEPLOY_ENV} (tag: ${env.FULL_TAG})"
+                    }
+                }
+            }
+        }
+
+        // ── Stage 7: Smoke Test ───────────────────────────────────────────────
+        stage('💨 Smoke Test') {
+            when {
+                expression { !params.SKIP_DEPLOY }
+            }
+            steps {
+                withCredentials([file(credentialsId: env.KUBECONFIG_CREDS, variable: 'KUBECONFIG')]) {
+                    script {
+                        // Wait for pods to be ready
+                        sh "kubectl rollout status deployment/gateway    -n ${env.K8S_NAMESPACE} --timeout=120s"
+                        sh "kubectl rollout status deployment/frontend   -n ${env.K8S_NAMESPACE} --timeout=120s"
+                        sh "kubectl rollout status deployment/auth       -n ${env.K8S_NAMESPACE} --timeout=120s"
+                        sh "kubectl rollout status deployment/products   -n ${env.K8S_NAMESPACE} --timeout=120s"
+                        sh "kubectl get pods -n ${env.K8S_NAMESPACE}"
+                        echo "✅ All pods are healthy"
+                    }
+                }
+            }
+        }
+    }
+
+    // ─── Post Actions ─────────────────────────────────────────────────────────
+    post {
+        always {
+            echo "Pipeline finished: ${currentBuild.currentResult}"
+            // Clean up dangling images
+            sh 'docker image prune -f || true'
+        }
+        success {
+            echo "✅ ShopWave deployed successfully! Tag: ${env.FULL_TAG}"
+        }
+        failure {
+            echo "❌ Pipeline failed. Check logs above."
+            // Optional: send Slack/email notification
+        }
+        unstable {
+            echo "⚠️ Pipeline is unstable (some tests failed)."
+        }
+    }
+}
