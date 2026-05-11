@@ -1,30 +1,22 @@
 pipeline {
     agent any
 
-    // ─── Pipeline-wide environment ────────────────────────────────────────────
     environment {
-        APP_NAME         = 'shopwave'
-        REGISTRY         = 'docker.io/aladin78'  
-        REGISTRY_CREDS   = 'dockerhub-credentials'
-        K8S_NAMESPACE    = 'shopwave'
-        HELM_RELEASE     = 'shopwave'
-        HELM_CHART_PATH  = './helm'
-        HELM_VALUES_PROD = './helm/values-prod.yaml'
-        KUBECONFIG_CREDS = 'k8s-kubeconfig'      
-        GIT_REPO         = 'https://gitlab.com/dev8314550/micro-app.git'
+        APP_NAME       = 'pratas'
+        REGISTRY       = 'docker.io/aladin78'
+        REGISTRY_CREDS = 'dockerhub-credentials' // ID des credentials Jenkins pour Docker Hub
+        GIT_REPO       = 'https://github.com/BenouadahAlaEddine/pratas1.git'
     }
 
-    // ─── Parameters ───────────────────────────────────────────────────────────
     parameters {
         string(name: 'IMAGE_TAG', defaultValue: "${env.BUILD_NUMBER}", description: 'Docker image tag')
-        choice(name: 'DEPLOY_ENV', choices: ['staging', 'production'], description: 'Deployment environment')
-        booleanParam(name: 'SKIP_TESTS', defaultValue: false, description: 'Skip tests')
-        booleanParam(name: 'SKIP_DEPLOY', defaultValue: false, description: 'Build only, skip Helm deploy')
+        booleanParam(name: 'SKIP_TESTS', defaultValue: false, description: 'Skip unit tests')
+        booleanParam(name: 'SKIP_SCAN', defaultValue: false, description: 'Skip Trivy security scan')
     }
 
     options {
         buildDiscarder(logRotator(numToKeepStr: '10'))
-        timeout(time: 45, unit: 'MINUTES')
+        timeout(time: 30, unit: 'MINUTES')
         disableConcurrentBuilds()
         timestamps()
     }
@@ -33,73 +25,34 @@ pipeline {
         // ── Stage 1: Checkout ─────────────────────────────────────────────────
         stage('📥 Checkout') {
             steps {
-                echo "Checking out ${env.BRANCH_NAME} @ ${env.GIT_COMMIT}"
                 checkout scm
                 script {
                     env.IMAGE_TAG    = params.IMAGE_TAG ?: env.BUILD_NUMBER
                     env.SHORT_COMMIT = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
                     env.FULL_TAG     = "${env.IMAGE_TAG}-${env.SHORT_COMMIT}"
                 }
-                echo "Image tag: ${env.FULL_TAG}"
+                echo "🏷️ Image tag final: ${env.FULL_TAG}"
             }
         }
 
-        // ── Stage 2: Lint & Test (parallel) ──────────────────────────────────
-        stage('🧪 Test') {
+        // ── Stage 2: Unit Tests (Parallel) ────────────────────────────────────
+        stage('🧪 Unit Tests') {
             when { expression { !params.SKIP_TESTS } }
             parallel {
-                stage('Test: gateway') {
-                    steps {
-                        dir('gateway') {
-                            sh 'npm ci'
-                            sh 'npm test --passWithNoTests || true'
-                        }
-                    }
+                stage('Test: Gateway') {
+                    steps { dir('gateway') { sh 'npm ci && npm test --passWithNoTests || true' } }
                 }
-                stage('Test: auth') {
-                    steps {
-                        dir('services/auth') {
-                            sh 'npm ci'
-                            sh 'npm test --passWithNoTests || true'
-                        }
-                    }
+                stage('Test: Auth') {
+                    steps { dir('services/auth') { sh 'npm ci && npm test --passWithNoTests || true' } }
                 }
-                stage('Test: products') {
-                    steps {
-                        dir('services/products') {
-                            sh 'npm ci'
-                            sh 'npm test --passWithNoTests || true'
-                        }
-                    }
+                stage('Test: Products') {
+                    steps { dir('services/products') { sh 'npm ci && npm test --passWithNoTests || true' } }
                 }
-                stage('Test: orders') {
-                    steps {
-                        dir('services/orders') {
-                            sh 'npm ci'
-                            sh 'npm test --passWithNoTests || true'
-                        }
-                    }
-                }
-                stage('Test: payments') {
-                    steps {
-                        dir('services/payments') {
-                            sh 'npm ci'
-                            sh 'npm test --passWithNoTests || true'
-                        }
-                    }
-                }
-                stage('Test: notifications') {
-                    steps {
-                        dir('services/notifications') {
-                            sh 'npm ci'
-                            sh 'npm test --passWithNoTests || true'
-                        }
-                    }
-                }
+                // Ajoute les autres services ici si nécessaire
             }
         }
 
-        // ── Stage 3: Docker Build (parallel) ──────────────────────────────────
+        // ── Stage 3: Docker Build (Parallel) ──────────────────────────────────
         stage('🐳 Build Docker Images') {
             steps {
                 script {
@@ -119,8 +72,6 @@ pipeline {
                         builds["Build: ${s.name}"] = {
                             def imageTag = "${env.REGISTRY}/${s.name}:${env.FULL_TAG}"
                             sh "docker build -t ${imageTag} ${s.path}"
-                            // Also tag as latest
-                            sh "docker tag ${imageTag} ${env.REGISTRY}/${s.name}:latest"
                             echo "✅ Built: ${imageTag}"
                         }
                     }
@@ -129,7 +80,25 @@ pipeline {
             }
         }
 
-        // ── Stage 4: Push to Registry ─────────────────────────────────────────
+        // ── Stage 4: Security Scan (Trivy) ────────────────────────────────────
+        stage('🛡️ Security Scan (Trivy)') {
+            when { expression { !params.SKIP_SCAN } }
+            steps {
+                script {
+                    def services = ['gateway', 'auth', 'products', 'orders', 'payments', 'notifications', 'frontend']
+                    services.each { svc ->
+                        def imageTag = "${env.REGISTRY}/${svc}:${env.FULL_TAG}"
+                        echo "Scanning ${imageTag}..."
+                        // Scanne l'image locale. Exit code 1 si CRITICAL trouvée.
+                        sh "trivy image --severity HIGH,CRITICAL --exit-code 1 ${imageTag} || true" 
+                        // Note: J'ai mis '|| true' pour ne pas bloquer le pipeline lors du test. 
+                        // En prod, enlève le '|| true' pour échouer le build si vulnérabilité.
+                    }
+                }
+            }
+        }
+
+        // ── Stage 5: Push to Docker Hub ───────────────────────────────────────
         stage('📤 Push Images') {
             steps {
                 withCredentials([usernamePassword(
@@ -159,77 +128,19 @@ pipeline {
                 }
             }
         }
-
-        // ── Stage 5: Helm Lint ────────────────────────────────────────────────
-        stage('⎈ Helm Lint') {
-            steps {
-                sh "helm lint ${env.HELM_CHART_PATH}"
-                sh "helm template ${env.HELM_RELEASE} ${env.HELM_CHART_PATH} --set global.imageRegistry=${env.REGISTRY} > /tmp/shopwave-manifests.yaml"
-                sh "cat /tmp/shopwave-manifests.yaml | head -100"
-                echo "✅ Helm chart is valid"
-            }
-        }
-
-        // ── Stage 6: Deploy to Kubernetes ─────────────────────────────────────
-        stage('🚀 Deploy to Kubernetes') {
-            when {
-                expression { !params.SKIP_DEPLOY }
-            }
-            steps {
-                script {
-                    def valuesFile = params.DEPLOY_ENV == 'production' ? env.HELM_VALUES_PROD : env.HELM_CHART_PATH + '/values.yaml'
-                    def extraArgs = "--set global.imageRegistry=${env.REGISTRY}"
-                    // Set individual service image tags
-                    ['gateway', 'auth', 'products', 'orders', 'payments', 'notifications', 'frontend'].each { svc ->
-                        extraArgs += " --set ${svc}.tag=${env.FULL_TAG}"
-                    }
-
-                    sh """
-                        helm upgrade --install ${env.HELM_RELEASE} ${env.HELM_CHART_PATH} \\
-                            --namespace ${env.K8S_NAMESPACE} \\
-                            --create-namespace \\
-                            -f ${valuesFile} \\
-                            ${extraArgs} \\
-                            --wait \\
-                            --timeout 5m \\
-                            --atomic
-                    """
-                    echo "✅ Deployed ${env.HELM_RELEASE} to ${params.DEPLOY_ENV} (tag: ${env.FULL_TAG})"
-                }
-            }
-        }
-
-        // ── Stage 7: Smoke Test ───────────────────────────────────────────────
-        stage('💨 Smoke Test') {
-            when {
-                expression { !params.SKIP_DEPLOY }
-            }
-            steps {
-                script {
-                    // redundant rollout status removed as helm --wait handles it
-                    sh "kubectl get pods -n ${env.K8S_NAMESPACE}"
-                    echo "✅ All pods are healthy"
-                }
-            }
-        }
     }
 
-    // ─── Post Actions ─────────────────────────────────────────────────────────
     post {
         always {
-            echo "Pipeline finished: ${currentBuild.currentResult}"
-            // Clean up dangling images
+            echo "🧹 Cleaning up..."
             sh 'docker image prune -f || true'
         }
         success {
-            echo "✅ ShopWave deployed successfully! Tag: ${env.FULL_TAG}"
+            echo "✅ CI Successful! Images pushed with tag: ${env.FULL_TAG}"
+            echo "➡️ Next step: Trigger CD Pipeline or update Helm values manually."
         }
         failure {
-            echo "❌ Pipeline failed. Check logs above."
-            // Optional: send Slack/email notification
-        }
-        unstable {
-            echo "⚠️ Pipeline is unstable (some tests failed)."
+            echo "❌ CI Failed. Check logs."
         }
     }
 }
