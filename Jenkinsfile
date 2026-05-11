@@ -4,7 +4,7 @@ pipeline {
     environment {
         APP_NAME       = 'pratas'
         REGISTRY       = 'docker.io/aladin78'
-        REGISTRY_CREDS = 'dockerhub-credentials' // ID des credentials Jenkins pour Docker Hub
+        REGISTRY_CREDS = 'dockerhub-credentials' 
         GIT_REPO       = 'https://github.com/BenouadahAlaEddine/pratas1.git'
     }
 
@@ -52,7 +52,7 @@ pipeline {
             }
         }
 
-        // ── Stage 3: Docker Build (Parallel) ──────────────────────────────────
+        // ── Stage 3: Docker Build & Tag (Parallel) ────────────────────────────
         stage('🐳 Build Docker Images') {
             steps {
                 script {
@@ -71,8 +71,15 @@ pipeline {
                         def s = svc
                         builds["Build: ${s.name}"] = {
                             def imageTag = "${env.REGISTRY}/${s.name}:${env.FULL_TAG}"
+                            def latestTag = "${env.REGISTRY}/${s.name}:latest"
+                            
+                            // 1. Build avec le tag unique
                             sh "docker build -t ${imageTag} ${s.path}"
-                            echo "✅ Built: ${imageTag}"
+                            
+                            // 2. Taguer aussi en 'latest'
+                            sh "docker tag ${imageTag} ${latestTag}"
+                            
+                            echo "✅ Built & Tagged: ${imageTag} & ${latestTag}"
                         }
                     }
                     parallel builds
@@ -89,10 +96,8 @@ pipeline {
                     services.each { svc ->
                         def imageTag = "${env.REGISTRY}/${svc}:${env.FULL_TAG}"
                         echo "Scanning ${imageTag}..."
-                        // Scanne l'image locale. Exit code 1 si CRITICAL trouvée.
+                        // Scanne l'image locale. 
                         sh "trivy image --severity HIGH,CRITICAL --exit-code 1 ${imageTag} || true" 
-                        // Note: J'ai mis '|| true' pour ne pas bloquer le pipeline lors du test. 
-                        // En prod, enlève le '|| true' pour échouer le build si vulnérabilité.
                     }
                 }
             }
@@ -109,26 +114,22 @@ pipeline {
                     sh 'echo "$REGISTRY_PASS" | docker login -u "$REGISTRY_USER" --password-stdin'
                     script {
                         def services = ['gateway', 'auth', 'products', 'orders', 'payments', 'notifications', 'frontend']
+                        def pushes = [:]
+                        
                         services.each { svc ->
-                            def fullTag = "${env.REGISTRY}/${svc}:${env.FULL_TAG}"
-                            def latestTag = "${env.REGISTRY}/${svc}:latest"
-                            
-                            // Vérifier si l'image existe avant de pousser
-                            def result = sh(script: "docker images -q ${fullTag}", returnStatus: true)
-                            if (result == 0) {
+                            def s = svc
+                            pushes["Push: ${s}"] = {
+                                def fullTag = "${env.REGISTRY}/${s}:${env.FULL_TAG}"
+                                def latestTag = "${env.REGISTRY}/${s}:latest"
+                                
                                 echo "Pushing ${fullTag}..."
                                 sh "docker push ${fullTag}"
                                 
-                                // Pousser aussi le tag latest s'il existe
-                                def resultLatest = sh(script: "docker images -q ${latestTag}", returnStatus: true)
-                                if (resultLatest == 0) {
-                                    echo "Pushing ${latestTag}..."
-                                    sh "docker push ${latestTag}"
-                                }
-                            } else {
-                                echo "⚠️ Image ${fullTag} not found locally! Skipping push."
+                                echo "Pushing ${latestTag}..."
+                                sh "docker push ${latestTag}"
                             }
                         }
+                        parallel pushes
                     }
                 }
             }
@@ -138,6 +139,7 @@ pipeline {
                 }
             }
         }
+    }
 
     post {
         always {
@@ -146,7 +148,6 @@ pipeline {
         }
         success {
             echo "✅ CI Successful! Images pushed with tag: ${env.FULL_TAG}"
-            echo "➡️ Next step: Trigger CD Pipeline or update Helm values manually."
         }
         failure {
             echo "❌ CI Failed. Check logs."
