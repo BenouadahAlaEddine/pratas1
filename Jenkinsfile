@@ -109,16 +109,26 @@ pipeline {
                     sh 'echo "$REGISTRY_PASS" | docker login -u "$REGISTRY_USER" --password-stdin'
                     script {
                         def services = ['gateway', 'auth', 'products', 'orders', 'payments', 'notifications', 'frontend']
-                        def pushes = [:]
                         services.each { svc ->
-                            def s = svc
-                            pushes["Push: ${s}"] = {
-                                sh "docker push ${env.REGISTRY}/${s}:${env.FULL_TAG}"
-                                sh "docker push ${env.REGISTRY}/${s}:latest"
-                                echo "✅ Pushed: ${env.REGISTRY}/${s}:${env.FULL_TAG}"
+                            def fullTag = "${env.REGISTRY}/${svc}:${env.FULL_TAG}"
+                            def latestTag = "${env.REGISTRY}/${svc}:latest"
+                            
+                            // Vérifier si l'image existe avant de pousser
+                            def result = sh(script: "docker images -q ${fullTag}", returnStatus: true)
+                            if (result == 0) {
+                                echo "Pushing ${fullTag}..."
+                                sh "docker push ${fullTag}"
+                                
+                                // Pousser aussi le tag latest s'il existe
+                                def resultLatest = sh(script: "docker images -q ${latestTag}", returnStatus: true)
+                                if (resultLatest == 0) {
+                                    echo "Pushing ${latestTag}..."
+                                    sh "docker push ${latestTag}"
+                                }
+                            } else {
+                                echo "⚠️ Image ${fullTag} not found locally! Skipping push."
                             }
                         }
-                        parallel pushes
                     }
                 }
             }
@@ -128,7 +138,6 @@ pipeline {
                 }
             }
         }
-    }
 
     post {
         always {
